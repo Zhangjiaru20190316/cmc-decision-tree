@@ -122,6 +122,11 @@ h2.sec::before{content:"";width:4px;height:18px;background:var(--brand);border-r
 .tnode.open > .trow > .tw{transform:rotate(90deg)}
 .trow .tw{transition:transform .12s}
 .leafdot{width:6px;height:6px;border-radius:50%;background:var(--sub);display:inline-block;margin:9px 5px 0 3px}
+.prow{font-size:12.5px;color:var(--sub);margin-top:4px;line-height:1.65;background:var(--bg);border-radius:6px;padding:3px 9px;display:inline-block;max-width:100%}
+.prow .pv{color:var(--chip-m);font-weight:600;margin-right:2px}
+.prow .pw{color:var(--chip-k)}
+.prow .pe{color:var(--chip-t)}
+.ctitle{font-weight:700;font-size:13.5px;margin-bottom:2px}
 
 /* ---- 题型/方法页头 ---- */
 .pagehead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:6px 0 2px}
@@ -309,6 +314,54 @@ function tableHtml(rows){
   return h+'</tbody></table>';
 }
 
+/* ================= 题型两表解析（并入决策树叶子用） ================= */
+const REF_RE = /(一元微分|一元微|一元积分|一元积|多元微分|多元微|多元积分|多元积|微分方程|无穷级数|级数)\s*(?:方法\s*)?(\d+)\.(\d+)|(?<![一-龥])方法\s*(\d+)\.(\d+)/g;
+function extractMethodKeys(text, block){
+  const keys = new Set();
+  let m; REF_RE.lastIndex = 0;
+  while((m = REF_RE.exec(text))){
+    const book = (m[1] ? (resolveAlias(m[1]) || null) : null) || BLOCK_BOOK[block];
+    const id = m[1] ? m[2]+'.'+m[3] : m[4]+'.'+m[5];
+    if(book && methodExists(book,id)) keys.add(book+'/'+id);
+  }
+  // 跳转表"方法"列的 md 链接锚点：#方法-12-… → book 1.2
+  const reA = /([^.]+)_习题集\.md#方法-(\d)(\d+)/g;
+  while((m = reA.exec(text))){
+    let book = null;
+    BOOK_ORDER.forEach(b=>{ if(m[1].indexOf(b)>=0) book=b; });
+    const id = m[2]+'.'+m[3];
+    if(book && methodExists(book,id)) keys.add(book+'/'+id);
+  }
+  return keys;
+}
+function parseTableRows(md){
+  const rows = [];
+  for(const L of (md||'').split('\n')){
+    const m = L.match(/^\|(.+)\|\s*$/);
+    if(!m) continue;
+    const cells = m[1].split('|').map(s=>s.trim());
+    if(cells.length < 2) continue;
+    if(!/[\u4e00-\u9fa5A-Za-z]/.test(cells.join(''))) continue; // 分隔线
+    if(/^信号$|^方法$/.test(cells[0])) continue;                  // 表头
+    rows.push(cells);
+  }
+  return rows;
+}
+/* 方法优先级表 → [{keys:Set, alt, trap}]（cells: 信号|首选|备选|头号陷阱） */
+function parsePriorityRows(T){
+  return parseTableRows(T.priority).map(cells => ({
+    keys: extractMethodKeys(cells[1]+' '+cells[2], T.block),
+    alt: cells[2]||'', trap: cells[3]||'',
+  })).filter(r => r.keys.size);
+}
+/* 经典例题跳转表 → [{keys:Set, ex, essence}]（cells: 方法|经典例|一句话用法精髓） */
+function parseJumpRows(T){
+  return parseTableRows(T.jump).map(cells => ({
+    keys: extractMethodKeys(cells[0], T.block),
+    ex: cells[1]||'', essence: cells[2]||'',
+  })).filter(r => r.keys.size);
+}
+
 /* ================= 交互树渲染 ================= */
 function refChips(refs, ctx){
   const chips = [];
@@ -323,15 +376,39 @@ function refChips(refs, ctx){
   });
   return chips.length ? '<span class="trefs">'+chips.join('')+'</span>' : '';
 }
+/* 叶子一体化信息：经典例跳转（链接到方法页）· 用法精髓 · 备选 · 头号陷阱 */
+function leafInfo(n, ctx){
+  if(!ctx.prows && !ctx.jrows) return '';
+  const keys = [];
+  (n.r||[]).forEach(r=>{
+    if(r.k!=='method') return;
+    const book = (r.book ? (resolveAlias(r.book)||null) : null) || ctx.book || BLOCK_BOOK[ctx.block];
+    if(book && methodExists(book,r.id)) keys.push(book+'/'+r.id);
+  });
+  if(!keys.length) return '';
+  let h = '';
+  const j = ctx.jrows && ctx.jrows.find(row => keys.some(k => row.keys.has(k)));
+  if(j){
+    const hit = keys.find(k => j.keys.has(k));
+    h += '<div class="prow"><a class="pe" href="#/method/'+hit+'">📘 '+esc(j.ex)+'</a> · 💡 '+inlineMd(refLinkify(j.essence,ctx))+'</div>';
+  }
+  const pr = ctx.prows && ctx.prows.find(row => keys.some(k => row.keys.has(k)));
+  if(pr && (pr.alt || pr.trap)){
+    h += '<div class="prow"><span class="pv">备选</span> '+inlineMd(refLinkify(pr.alt,ctx))
+      + (pr.trap ? ' <span class="pw">⚠ '+inlineMd(refLinkify(pr.trap,ctx))+'</span>' : '')+'</div>';
+  }
+  return h;
+}
 function nodeHtml(n, depth, ctx){
   const hasKids = n.k && n.k.length;
   const lines = String(n.t).split('\n');
   const label = lines.map((l,j)=> j===0
     ? '<span class="tline">'+inlineMd(l)+'</span>'
     : '<span class="tline cont">'+inlineMd(l)+'</span>').join('');
+  const leaf = (!hasKids && (ctx.prows || ctx.jrows)) ? leafInfo(n, ctx) : '';
   const row = '<div class="trow'+(hasKids?' clickable':'')+'">'
     + (hasKids ? '<span class="tw">▶</span>' : '<span class="leafdot"></span>')
-    + '<span class="tt">'+label+refChips(n.r,ctx)+'</span></div>';
+    + '<span class="tt">'+label+refChips(n.r,ctx)+leaf+'</span></div>';
   const kids = hasKids ? '<div class="tkids">'+n.k.map(c=>nodeHtml(c,depth+1,ctx)).join('')+'</div>' : '';
   return '<div class="tnode'+(hasKids && depth<=0 ? ' open':'')+'"'+(hasKids?' data-haskids="1"':'')+'>'+row+kids+'</div>';
 }
@@ -474,27 +551,31 @@ function vBlock(num){
     + '<h2 class="sec">本块题型（点击下钻）</h2><div class="grid g2">'+cards+'</div>';
 }
 
-/* ---- 题型层（七要素） ---- */
+/* ---- 题型层（信号 + 全信息决策树 + 口诀 + 折叠资料区） ---- */
 function vType(id){
   const T = M.types[id];
   if(!T){ location.hash='#/home'; return; }
   const idx = TYPE_ORDER.indexOf(id);
   const prev = TYPE_ORDER[idx-1], next = TYPE_ORDER[idx+1];
   const q = quickById[id];
-  const sec = (title, inner, cls) => inner ? '<h2 class="sec">'+title+'</h2><div class="card '+(cls||'md')+'">'+inner+'</div>' : '';
+  const ctx = {block:T.block, prows:parsePriorityRows(T), jrows:parseJumpRows(T)};
   const blk = M.blocks.find(b=>b.num===T.block);
   setCrumbs([{t:'首页',href:'#/home'},{t:'题块'+T.block+' · '+(blk?blk.title:''),href:'#/block/'+T.block},{t:'题型 '+id}]);
   let html = '<div class="pagehead"><span class="pid" style="background:'+blockColor(T.block)+'">题型 '+id+'</span><h1>'+esc(T.name)+'</h1></div>';
-  if(q) html += '<div class="pagemeta">🎯 首选：'+mdHtml(q.cells[0],{block:T.block})+' ｜ ⚠ 头号陷阱：'+esc(q.cells[2])+'</div>';
-  html += sec('① 判型信号', '<div class="callout info md">'+mdHtml(T.signals,{block:T.block})+'</div>'+(T.lead?'<div class="md">'+mdHtml(T.lead,{block:T.block})+'</div>':''));
-  html += sec('② 题型决策树（逐层点击）', renderTree(T.tree,{block:T.block})+(T.treeNoteMd?'<div class="md">'+mdHtml(T.treeNoteMd,{block:T.block})+'</div>':''), '');
-  html += sec('③ 方法优先级表', mdHtml(T.priority,{block:T.block}));
-  html += T.jump ? '<h2 class="sec">④ 经典例题跳转表</h2><details class="fold" open><summary>分册方法 → 最经典本质例题（点击直达方法层）</summary><div class="md">'+mdHtml(T.jump,{block:T.block})+'</div></details>' : '';
-  html += sec('⑤ 关键动作与口诀', '<div class="callout md">'+mdHtml(T.actions,{block:T.block})+'</div>');
-  html += sec('⑥ 真题对拍', mdHtml(T.exam,{block:T.block}));
-  html += sec('⑦ 判型示范题', '<div class="callout warn md">'+mdHtml(T.demo,{block:T.block})+'</div>');
-  html += sec('⑧ 关联出处', mdHtml(T.ref,{block:T.block}));
-  T.extras.forEach(x=>{ html += sec(x.title, mdHtml(x.md,{block:T.block})); });
+  if(q) html += '<div class="pagemeta">🎯 首选：'+mdHtml(q.cells[0],ctx)+' ｜ ⚠ 头号陷阱：'+esc(q.cells[2])+'</div>';
+  if(T.signals || T.lead) html += '<div class="callout info md"><div class="ctitle">🎯 判型信号</div>'
+    + mdHtml(T.signals,ctx)+(T.lead?'<div class="md">'+mdHtml(T.lead,ctx)+'</div>':'')+'</div>';
+  html += '<h2 class="sec">题型决策树（叶子已并入：经典例 · 用法精髓 · 备选 · 陷阱）</h2>'
+    + '<div class="card">'+renderTree(T.tree,ctx)
+    + (T.treeNoteMd?'<div class="md">'+mdHtml(T.treeNoteMd,ctx)+'</div>':'')+'</div>';
+  if(T.actions) html += '<div class="callout md"><div class="ctitle">📢 关键动作与口诀</div>'+mdHtml(T.actions,ctx)+'</div>';
+  const fold = (title, innerMd) => innerMd ? '<details class="fold"><summary>'+title+'</summary><div class="md">'+mdHtml(innerMd,ctx)+'</div></details>' : '';
+  html += fold('📊 方法优先级表（原书表格）', T.priority);
+  html += fold('📚 经典例题跳转表（原书表格）', T.jump);
+  html += fold('📜 真题对拍', T.exam);
+  html += fold('✏️ 判型示范题（含思路骨架）', T.demo);
+  html += fold('🔗 关联出处', T.ref);
+  T.extras.forEach(x=>{ html += fold('📎 '+x.title, x.md); });
   html += '<div class="navrow">'+(prev?'<a href="#/type/'+prev+'">← 题型 '+prev+' '+esc(M.types[prev].name)+'</a>':'<span></span>')
     + (next?'<a href="#/type/'+next+'">题型 '+next+' '+esc(M.types[next].name)+' →</a>':'<span></span>')+'</div>';
   app.innerHTML = html;
